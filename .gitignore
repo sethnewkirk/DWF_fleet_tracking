@@ -29,8 +29,7 @@ Thumbs.db
 .env
 config_local.py
 
-# Output (regenerable)
-output/static/*.png
+# Output (regenerable) - keep map PNGs, ignore PDFs and generated data
 output/static/*.pdf
 output/static/*.svg
 output/interactive/data/
