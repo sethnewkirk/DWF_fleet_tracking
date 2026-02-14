@@ -2,14 +2,16 @@
 Download and extract GFW fishing effort data for Chinese-flagged vessels.
 
 Two strategies:
-  1. Preferred: Use GFW Python API to query CHN-only data directly
+  1. Preferred: Use GFW 4Wings API to query CHN-only data directly
   2. Fallback:  Download bulk CSVs from Zenodo and filter post-download
 
 The bulk dataset on Zenodo is ~26.3 GB total (all flags, all years).
 The API approach avoids this by querying only CHN-flagged effort.
 """
 
+import io
 import sys
+import zipfile
 from pathlib import Path
 
 import pandas as pd
@@ -18,10 +20,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import config
 
 
+# Global bounding polygon for 4Wings POST requests
+GLOBAL_GEOJSON = {
+    "type": "Polygon",
+    "coordinates": [[
+        [-180, -90], [180, -90], [180, 90], [-180, 90], [-180, -90]
+    ]],
+}
+
+
 def download_via_api() -> bool:
     """
-    Use the GFW Python API client to fetch Chinese fishing effort.
+    Use the GFW 4Wings API to fetch Chinese fishing effort.
     Requires GFW_API_KEY to be set.
+
+    The 4Wings report endpoint requires a region (POST with GeoJSON)
+    and returns a ZIP containing a CSV.
 
     Returns True on success, False if API is unavailable.
     """
@@ -29,54 +43,76 @@ def download_via_api() -> bool:
         print("  No GFW API key configured. Set GFW_API_KEY env var or update config.")
         return False
 
-    try:
-        # The gfw-api-python-client provides map visualization and 4wings API
-        # For gridded effort, we use the 4wings API endpoint
-        import requests
+    import requests
 
-        headers = {
-            "Authorization": f"Bearer {config.GFW_API_KEY}",
-            "Content-Type": "application/json",
+    headers = {
+        "Authorization": f"Bearer {config.GFW_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    config.GFW_EFFORT_DIR.mkdir(parents=True, exist_ok=True)
+
+    for year in config.YEARS:
+        outfile = config.GFW_EFFORT_DIR / f"china_effort_{year}.csv"
+        if outfile.exists():
+            print(f"  {year}: already downloaded, skipping")
+            continue
+
+        print(f"  Fetching {year} fishing effort via 4Wings API...")
+
+        url = f"{config.GFW_API_BASE}/4wings/report"
+        params = {
+            "datasets[0]": "public-global-fishing-effort:latest",
+            "spatial-resolution": "LOW",
+            "temporal-resolution": "MONTHLY",
+            "group-by": "FLAGANDGEARTYPE",
+            "format": "CSV",
+            "date-range": f"{year}-01-01,{year}-12-31",
+            "filters[0]": f"flag in ('{config.TARGET_FLAG}')",
         }
+        body = {"geojson": GLOBAL_GEOJSON}
 
-        config.GFW_EFFORT_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            resp = requests.post(
+                url, headers=headers, params=params, json=body, timeout=300
+            )
 
-        for year in config.YEARS:
-            outfile = config.GFW_EFFORT_DIR / f"china_effort_{year}.csv"
-            if outfile.exists():
-                print(f"  {year}: already downloaded, skipping")
-                continue
+            # If 524 timeout, try fetching cached last report
+            if resp.status_code == 524:
+                print(f"  {year}: request timed out, fetching cached report...")
+                last_url = f"{config.GFW_API_BASE}/4wings/last-report"
+                resp = requests.get(
+                    last_url,
+                    headers={"Authorization": f"Bearer {config.GFW_API_KEY}"},
+                    timeout=120,
+                )
 
-            print(f"  Fetching {year} fishing effort via API...")
+            resp.raise_for_status()
 
-            # Use the datasets API to get fishing effort filtered by flag
-            url = f"{config.GFW_API_BASE}/datasets/public-global-fishing-effort:latest/download"
-            params = {
-                "format": "csv",
-                "filters[0]": f"flag in ('{config.TARGET_FLAG}')",
-                "date-range": f"{year}-01-01,{year}-12-31",
-                "spatial-resolution": "low",  # 0.1 degree
-                "temporal-resolution": "yearly",
-            }
-
-            try:
-                resp = requests.get(url, headers=headers, params=params, timeout=300)
-                resp.raise_for_status()
-
+            # Response is a ZIP file; extract the CSV inside
+            if resp.content[:2] == b"PK":
+                with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+                    csv_names = [n for n in zf.namelist() if n.endswith(".csv")]
+                    if csv_names:
+                        csv_data = zf.read(csv_names[0])
+                        with open(outfile, "wb") as f:
+                            f.write(csv_data)
+                        print(f"  Saved {outfile} ({len(csv_data) / 1e6:.1f} MB)")
+                    else:
+                        print(f"  {year}: ZIP contained no CSV: {zf.namelist()}")
+                        return False
+            else:
+                # Plain CSV response
                 with open(outfile, "wb") as f:
                     f.write(resp.content)
                 print(f"  Saved {outfile} ({len(resp.content) / 1e6:.1f} MB)")
 
-            except requests.RequestException as e:
-                print(f"  API request failed for {year}: {e}")
-                print("  Will fall back to bulk download.")
-                return False
+        except requests.RequestException as e:
+            print(f"  API request failed for {year}: {e}")
+            print("  Will fall back to bulk download.")
+            return False
 
-        return True
-
-    except ImportError:
-        print("  gfw-api-python-client not installed.")
-        return False
+    return True
 
 
 def download_bulk_from_zenodo() -> bool:

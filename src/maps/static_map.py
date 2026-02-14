@@ -108,11 +108,19 @@ def render_effort(ax, effort_df: pd.DataFrame):
     """
     Render fishing effort as colored scatter points by year.
 
-    Uses pcolormesh-style rendering via scatter with rasterization
-    for PDF/SVG export performance.
+    Uses rasterized scatter for PDF/SVG export performance.
     """
     if effort_df is None or len(effort_df) == 0:
         return
+
+    # Detect column names
+    lat_col = "lat" if "lat" in effort_df.columns else "grid_lat"
+    lon_col = "lon" if "lon" in effort_df.columns else "grid_lon"
+
+    # Compute global max for consistent alpha scaling across years
+    global_max_log = np.log1p(effort_df["fishing_hours"].values).max()
+    if global_max_log == 0:
+        global_max_log = 1
 
     for year in sorted(effort_df["year"].unique()):
         if year not in YEAR_COLORS:
@@ -123,8 +131,7 @@ def render_effort(ax, effort_df: pd.DataFrame):
         # Scale alpha by fishing hours intensity (log scale)
         hours = year_data["fishing_hours"].values
         log_hours = np.log1p(hours)
-        max_log = log_hours.max() if log_hours.max() > 0 else 1
-        alphas = EFFORT_ALPHA_MIN + (EFFORT_ALPHA_MAX - EFFORT_ALPHA_MIN) * (log_hours / max_log)
+        alphas = EFFORT_ALPHA_MIN + (EFFORT_ALPHA_MAX - EFFORT_ALPHA_MIN) * (log_hours / global_max_log)
 
         # Convert color to RGBA array
         rgb = mcolors.to_rgb(color)
@@ -136,13 +143,58 @@ def render_effort(ax, effort_df: pd.DataFrame):
         ])
 
         ax.scatter(
-            year_data["grid_lon"].values,
-            year_data["grid_lat"].values,
+            year_data[lon_col].values,
+            year_data[lat_col].values,
             c=colors,
             s=1.5,
             transform=PLATE_CARREE,
             rasterized=True,
             zorder=2,
+        )
+
+
+def render_ais_gaps(ax, gaps_df: pd.DataFrame):
+    """Render AIS gap off-positions as small translucent cyan dots."""
+    if gaps_df is None or len(gaps_df) == 0:
+        return
+
+    # Use the off-position (where AIS was disabled)
+    lat_col = "off_lat" if "off_lat" in gaps_df.columns else "lat"
+    lon_col = "off_lon" if "off_lon" in gaps_df.columns else "lon"
+
+    ax.scatter(
+        gaps_df[lon_col].values,
+        gaps_df[lat_col].values,
+        c="#88ccff",
+        s=3,
+        alpha=0.15,
+        transform=PLATE_CARREE,
+        rasterized=True,
+        zorder=3,
+    )
+
+
+def render_encounters(ax, enc_df: pd.DataFrame):
+    """Render encounter events as small translucent purple dots."""
+    if enc_df is None or len(enc_df) == 0:
+        return
+
+    # Separate transshipment (carrier involved) from fishing-fishing
+    carrier = enc_df[enc_df["encounter_type"].isin(["carrier-fishing", "fishing-carrier"])]
+    fishing = enc_df[enc_df["encounter_type"] == "fishing-fishing"]
+
+    if len(fishing) > 0:
+        ax.scatter(
+            fishing["lon"].values, fishing["lat"].values,
+            c="#6644aa", s=2, alpha=0.08,
+            transform=PLATE_CARREE, rasterized=True, zorder=3,
+        )
+    if len(carrier) > 0:
+        ax.scatter(
+            carrier["lon"].values, carrier["lat"].values,
+            c="#aa66cc", s=8, alpha=0.6,
+            marker="h",
+            transform=PLATE_CARREE, rasterized=True, zorder=4,
         )
 
 
@@ -305,6 +357,8 @@ def create_inset(fig, bounds, extent, title, eez_gdf=None, effort_df=None, incid
 def render_map(
     effort_df: pd.DataFrame | None = None,
     incidents_df: pd.DataFrame | None = None,
+    gaps_df: pd.DataFrame | None = None,
+    encounters_df: pd.DataFrame | None = None,
     eez_gdf: gpd.GeoDataFrame | None = None,
     output_prefix: str = "dwf_global_map",
 ):
@@ -312,8 +366,10 @@ def render_map(
     Render the full publication-quality map.
 
     Args:
-        effort_df: Processed fishing effort DataFrame (from process_effort.py)
+        effort_df: Processed fishing effort DataFrame
         incidents_df: Incident database DataFrame
+        gaps_df: AIS gap (disabling) events DataFrame
+        encounters_df: Encounter events DataFrame
         eez_gdf: EEZ boundary GeoDataFrame
         output_prefix: Filename prefix for output files
     """
@@ -332,8 +388,18 @@ def render_map(
 
     # Fishing effort
     if effort_df is not None:
-        print(f"  Rendering fishing effort ({len(effort_df)} cells)...")
+        print(f"  Rendering fishing effort ({len(effort_df):,} cells)...")
         render_effort(ax, effort_df)
+
+    # AIS gaps
+    if gaps_df is not None:
+        print(f"  Rendering {len(gaps_df):,} AIS gap events...")
+        render_ais_gaps(ax, gaps_df)
+
+    # Encounters
+    if encounters_df is not None:
+        print(f"  Rendering {len(encounters_df):,} encounter events...")
+        render_encounters(ax, encounters_df)
 
     # Incidents
     if incidents_df is not None:
@@ -423,14 +489,31 @@ if __name__ == "__main__":
             incidents = None
         render_map(incidents_df=incidents)
     else:
-        # Full render (requires processed effort data)
+        # Full render with all data layers
         effort = None
         effort_path = config.PROCESSED_DIR / "china_dwf_effort.parquet"
         if effort_path.exists():
             effort = pd.read_parquet(effort_path)
+
+        gaps = None
+        gaps_path = config.PROCESSED_DIR / "ais_gaps_intentional.parquet"
+        if gaps_path.exists():
+            gaps = pd.read_parquet(gaps_path)
+
+        encounters = None
+        enc_path = config.PROCESSED_DIR / "encounters.parquet"
+        if enc_path.exists():
+            encounters = pd.read_parquet(enc_path)
+
         from src.data.process_incidents import load_incidents
         try:
             incidents = load_incidents()
         except FileNotFoundError:
             incidents = None
-        render_map(effort_df=effort, incidents_df=incidents)
+
+        render_map(
+            effort_df=effort,
+            incidents_df=incidents,
+            gaps_df=gaps,
+            encounters_df=encounters,
+        )

@@ -88,7 +88,7 @@ def fetch_ais_gap_events():
             "datasets[0]": "public-global-gaps-events:latest",
             "flags[0]": config.TARGET_FLAG,
             "start-date": f"{year}-01-01",
-            "end-date": f"{year}-12-31",
+            "end-date": f"{year + 1}-01-01",
         }
 
         try:
@@ -124,7 +124,7 @@ def fetch_transshipment_events():
             "datasets[0]": "public-global-encounters-events:latest",
             "flags[0]": config.TARGET_FLAG,
             "start-date": f"{year}-01-01",
-            "end-date": f"{year}-12-31",
+            "end-date": f"{year + 1}-01-01",
         }
 
         try:
