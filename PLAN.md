@@ -40,7 +40,7 @@ Build a publication-quality global map of China's Distant Water Fishing (DWF) fl
 - C4ADS IUU fishing reports
 - Oceana reports on AIS avoidance
 - NOAA IUU fishing biennial reports
-- News reporting (Argentina, Philippines, Galapagos, South Korea incidents)
+- News reporting (Argentina, Galapagos, South Korea incidents)
 - RFMO IUU vessel lists (iuu-vessels.org)
 
 ### Key Data Limitations (to acknowledge on map)
@@ -116,23 +116,31 @@ DWF_fleet_tracking/
 ### Phase 1: Project Setup & Data Acquisition
 **Goal**: Set up the repo, install dependencies, download all base data.
 
+**Requirements**: Python 3.11+ (required by GFW API client)
+
 **Steps**:
 1. Initialize project structure (directories, requirements.txt, .gitignore, config.py)
 2. Install Python dependencies:
    - `cartopy` - map projections and basemap rendering
-   - `matplotlib` - static map rendering
+   - `matplotlib<3.10` - static map rendering (3.10.0 has a memory regression for savefig)
    - `geopandas` - spatial data processing
    - `pandas` - data manipulation
-   - `folium` - interactive Leaflet map generation
    - `requests` - API calls
    - `pyarrow` - Parquet support
    - `shapely` - geometric operations
    - `numpy` - numerical operations
    - `Pillow` - image processing
-3. Download GFW fishing effort v3.0 bulk data from Zenodo (2022-2024 monthly CSVs, flag=CHN)
-4. Download Marine Regions EEZ v12 shapefile
-5. Download Natural Earth data (1:50m coastlines, land, ocean, country boundaries)
+   - `gfw-api-python-client` - GFW Python API (preferred over bulk download for filtered queries)
+3. **Data acquisition strategy** (two paths):
+   - **Preferred (with API key)**: Use `gfw-api-python-client` to query fishing effort filtered to `flag=CHN` directly. Avoids downloading the full 26.3 GB Zenodo dataset. Also fetches AIS gap events and 2025 data.
+   - **Fallback (without API key)**: Download GFW fishing effort v3.0 bulk CSVs from Zenodo. These are ~26.3 GB unfiltered; must download all and filter to CHN post-download using chunked processing.
+4. Download Marine Regions EEZ v12 shapefile (requires free registration at marineregions.org)
+5. Download Natural Earth data (1:50m coastlines, land, ocean, country boundaries -- no registration needed)
 6. Create config.py with placeholder for GFW API key
+
+**User actions required**:
+- Register for GFW API key at https://globalfishingwatch.org/our-apis/
+- Register at https://www.marineregions.org/ for EEZ shapefile download
 
 **Deliverable**: All raw data downloaded and verified.
 
@@ -152,7 +160,7 @@ DWF_fleet_tracking/
    - Purse seiners (purse_seines)
 3. **Process EEZ boundaries**:
    - Simplify geometry for web (Douglas-Peucker)
-   - Identify specific EEZs of interest: American Samoa, Argentina, Ecuador (Galapagos), Philippines, South Korea, West African nations, Pacific island states
+   - Identify specific EEZs of interest: American Samoa, Argentina, Ecuador (Galapagos), South Korea, West African nations, Pacific island states
 4. **Compute EEZ proximity/violation indicators**:
    - For each grid cell with Chinese DWF activity, calculate distance to nearest non-Chinese EEZ
    - Flag grid cells that fall WITHIN foreign EEZs (potential violations)
@@ -181,15 +189,16 @@ country_affected, source_name, source_url, severity (1-3),
 vessels_involved, notes
 ```
 
+**Scope**: DWF commercial fishing activity only. Chinese maritime militia and coast guard activities are excluded -- they are a separate force with distinct command structures and should not be conflated with the DWF fleet in a government briefing.
+
 **Research targets** (I compile, you verify):
 - Argentina/Patagonian shelf incidents (2022-2025)
 - Galapagos EEZ edge massing (2022-2025)
-- American Samoa area activity
-- Philippines/South China Sea clashes
+- American Samoa / Central Pacific chronic DWF presence
 - South Korea EEZ seizures
-- West African IUU incidents
+- West African IUU incidents (Ghana, Senegal, Guinea)
 - Indian Ocean surge documentation
-- Pacific island EEZ violations
+- Pacific island EEZ violations (Vanuatu, Palau, others)
 
 **Deliverable**: `data/incidents/incidents.csv` with 30-60 documented incidents.
 
@@ -197,7 +206,7 @@ vessels_involved, notes
 **Goal**: Create a publication-quality global map meeting government briefing standards.
 
 **Base map design**:
-- **Projection**: Robinson, centered on 160°W (Pacific-centered, puts Americas on right, Asia on left)
+- **Projection**: Robinson, centered on 180° (`ccrs.Robinson(central_longitude=180)`, Pacific-centered)
 - **Ocean**: Dark navy (#0a1628) with subtle bathymetric shading
 - **Land**: Dark charcoal (#1a1a2e) with thin (#333355) country borders
 - **EEZ boundaries**: Very thin, low-opacity cyan lines (#4488aa at 20% opacity)
@@ -206,6 +215,9 @@ vessels_involved, notes
 
 **Data layers** (bottom to top):
 1. **Fishing effort heatmap** - 0.1° gridded fishing hours
+   - Rendered via `pcolormesh` (NOT `contourf`, which has a known bug with non-default `central_longitude` in cartopy)
+   - Must use `rasterized=True` for PDF/SVG export (0.1° grid = millions of cells)
+   - Must apply `cartopy.util.add_cyclic()` to prevent antimeridian seam artifacts
    - Color ramp per year:
      - 2022: pale yellow (#ffffb2)
      - 2023: light orange (#fecc5c)
@@ -235,8 +247,7 @@ vessels_involved, notes
 **Regional inset maps** (Americas & US Pacific focus):
 1. **Galapagos / Ecuador EEZ** - Show fleet massing at EEZ boundary
 2. **Argentine Patagonian Shelf** - Show activity along continental shelf edge and EEZ proximity
-3. **American Samoa / Central Pacific** - Show DWF presence near US territories
-4. **Optional: Philippines/South China Sea** - If space permits, show coast guard clash zone
+3. **American Samoa / Central Pacific** - Show chronic DWF presence near US territories
 
 **Inset design**: Same dark background, slightly zoomed, with EEZ clearly labeled. Connected to main map with subtle callout lines.
 
@@ -250,11 +261,17 @@ vessels_involved, notes
 ### Phase 5: Interactive Map Build
 **Goal**: Create a self-contained HTML file that opens in any browser.
 
-**Technology**: Folium (Python-generated Leaflet.js) or hand-crafted HTML with Leaflet + Mapbox GL JS. The choice depends on what achieves the best dark-background styling. Folium is faster to build; hand-crafted HTML gives more control.
+**Technology**: Hand-crafted HTML with Leaflet.js + Leaflet plugins. Folium's DOM-based marker rendering cannot handle the data volume (100K+ grid cells); we need either `Leaflet.heat` (heatmap plugin) or `L.canvas`-based rendering for performance.
+
+**Performance constraints**:
+- Fishing effort grid at 0.1° = potentially hundreds of thousands of cells
+- Must use `Leaflet.heat` or canvas-rendered `CircleMarker` (not SVG)
+- Incidents (30-60 points) can use standard Leaflet markers with popups
+- EEZ boundaries should be pre-simplified to <5MB GeoJSON
 
 **Features**:
-- **Dark basemap tile layer** (CartoDB Dark Matter or Mapbox dark style)
-- **Year toggle** - Checkbox or slider to show/hide each year (2022-2025)
+- **Dark basemap tile layer** (CartoDB Dark Matter -- no API key required)
+- **Year toggle** - Checkbox to show/hide each year (2022-2025)
 - **Layer toggle** - Show/hide: Fishing effort, AIS gaps, Incidents, EEZ boundaries
 - **Click-to-inspect** on incidents: popup with date, description, source link
 - **Hover** on fishing effort grid cells: fishing hours, year, gear type
@@ -262,7 +279,7 @@ vessels_involved, notes
 - **Legend** with year colors and incident categories
 - **Title overlay** with methodology note
 
-**Data embedding**: All data embedded as GeoJSON/JSON within the HTML file (or as companion files in the same directory). No external API calls needed to view.
+**Data embedding**: All data as companion JSON/GeoJSON files in the same directory. Loaded via fetch() from local files. No external API calls needed to view (but requires serving via a local HTTP server or file:// with relaxed CORS, documented in README).
 
 **Deliverable**: `output/interactive/index.html` (+ companion data files).
 
@@ -348,18 +365,25 @@ Phase 6 (Polish)
 
 | Risk | Impact | Mitigation |
 |------|--------|------------|
-| GFW bulk data is very large (multi-GB) | Slow download, memory issues | Filter by flag=CHN during download; use chunked processing |
-| GFW API key takes time to approve | Blocks gap events + 2025 data | Build pipeline with bulk data first; add API data as enhancement |
+| GFW bulk data is 26.3 GB (cannot pre-filter on Zenodo) | Slow download, memory issues | Use GFW Python API to query CHN-only data; fall back to bulk download with chunked processing |
+| GFW API key takes time to approve | Blocks gap events, 2025 data, and preferred data path | Build pipeline with bulk data first; add API data as enhancement |
+| Marine Regions EEZ requires registration | Minor blocker on download | Register early; Zenodo mirror available as backup |
 | Incident data is subjective | Credibility risk for briefing | Require minimum 2 independent sources per incident; clearly attribute |
+| Conflation of DWF with maritime militia | Credibility risk (different forces, different command structures) | Strictly exclude militia activity; only include documented commercial DWF incidents |
 | 50% AIS undercount | Map understates fleet size | Prominent caveat on map; consider VIIRS squid jigger data as supplement |
+| American Samoa lacks specific dated incidents | Thin evidence for a key region | Present as chronic presence zone with economic impact data, not specific incident markers |
 | Too much data on one map | Visual clutter | Aggressive filtering; opacity control; insets for detail; interactive version for exploration |
+| Interactive map performance (100K+ grid cells) | Browser freezes with DOM-based markers | Use Leaflet.heat or canvas rendering, not SVG markers |
+| cartopy contourf bug with central_longitude | Garbled heatmap output | Use pcolormesh exclusively; apply add_cyclic() for antimeridian |
 | Robinson projection distorts high latitudes | Visual misleading | Acceptable for this use case (most DWF is equatorial/mid-latitude); note projection in legend |
 
 ---
 
 ## Next Steps (Immediate)
 
-1. **User action**: Register for GFW API key at https://globalfishingwatch.org/our-apis/
+1. **User actions**:
+   - Register for GFW API key at https://globalfishingwatch.org/our-apis/
+   - Register at https://www.marineregions.org/ for EEZ shapefile download
 2. **Claude action**: Begin Phase 1 (project setup, dependency installation, data download scripts)
 3. **Parallel**: Begin Phase 3 incident research (I compile a draft, you review)
 
