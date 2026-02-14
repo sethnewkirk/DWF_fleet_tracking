@@ -24,7 +24,7 @@ from src.maps.styles import (
     GRATICULE_COLOR, TEXT_PRIMARY, TEXT_SECONDARY,
     YEAR_COLORS, YEAR_LABELS,
     INCIDENT_STYLES,
-    EFFORT_ALPHA_MIN, EFFORT_ALPHA_MAX,
+    EFFORT_ALPHA_MIN, EFFORT_ALPHA_MAX, EFFORT_POINT_SIZE,
     FONT_FAMILY, TITLE_FONTSIZE, SUBTITLE_FONTSIZE,
     LABEL_FONTSIZE, LEGEND_FONTSIZE, ANNOTATION_FONTSIZE, CAVEAT_FONTSIZE,
     MAP_DPI, MAP_FIGSIZE,
@@ -108,7 +108,9 @@ def render_effort(ax, effort_df: pd.DataFrame):
     """
     Render fishing effort as colored scatter points by year.
 
-    Uses rasterized scatter for PDF/SVG export performance.
+    Renders oldest year first so newer years paint on top.
+    Uses aggressive alpha scaling so low-effort cells barely show
+    and only high-effort hotspots are vivid.
     """
     if effort_df is None or len(effort_df) == 0:
         return
@@ -117,23 +119,26 @@ def render_effort(ax, effort_df: pd.DataFrame):
     lat_col = "lat" if "lat" in effort_df.columns else "grid_lat"
     lon_col = "lon" if "lon" in effort_df.columns else "grid_lon"
 
-    # Compute global max for consistent alpha scaling across years
-    global_max_log = np.log1p(effort_df["fishing_hours"].values).max()
-    if global_max_log == 0:
-        global_max_log = 1
-
+    # Use per-year percentile for alpha scaling (not global max)
+    # This ensures each year's hotspots are visible
     for year in sorted(effort_df["year"].unique()):
         if year not in YEAR_COLORS:
             continue
         year_data = effort_df[effort_df["year"] == year]
         color = YEAR_COLORS[year]
 
-        # Scale alpha by fishing hours intensity (log scale)
         hours = year_data["fishing_hours"].values
         log_hours = np.log1p(hours)
-        alphas = EFFORT_ALPHA_MIN + (EFFORT_ALPHA_MAX - EFFORT_ALPHA_MIN) * (log_hours / global_max_log)
 
-        # Convert color to RGBA array
+        # Use 95th percentile as effective max to avoid outlier compression
+        p95 = np.percentile(log_hours, 95)
+        if p95 == 0:
+            p95 = 1
+        normalized = np.clip(log_hours / p95, 0, 1)
+
+        # Quadratic curve: most points very faint, only hotspots bright
+        alphas = EFFORT_ALPHA_MIN + (EFFORT_ALPHA_MAX - EFFORT_ALPHA_MIN) * (normalized ** 2)
+
         rgb = mcolors.to_rgb(color)
         colors = np.column_stack([
             np.full(len(year_data), rgb[0]),
@@ -146,7 +151,7 @@ def render_effort(ax, effort_df: pd.DataFrame):
             year_data[lon_col].values,
             year_data[lat_col].values,
             c=colors,
-            s=1.5,
+            s=EFFORT_POINT_SIZE,
             transform=PLATE_CARREE,
             rasterized=True,
             zorder=2,
@@ -215,9 +220,9 @@ def render_incidents(ax, incidents_df: pd.DataFrame):
             marker=style["marker"],
             s=style["size"],
             edgecolors="white",
-            linewidths=0.5,
+            linewidths=1.0,
             transform=PLATE_CARREE,
-            zorder=5,
+            zorder=10,
             label=style["label"],
         )
 

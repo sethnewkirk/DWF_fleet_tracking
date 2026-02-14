@@ -44,37 +44,37 @@ INCIDENT_STYLES = {
         "color": "#ff4444",
         "marker": "^",  # triangle
         "label": "EEZ Violation",
-        "size": 60,
+        "size": 120,
     },
     "coast_guard_clash": {
         "color": "#ff0000",
         "marker": "D",  # diamond
         "label": "Enforcement Clash",
-        "size": 70,
+        "size": 130,
     },
     "ais_disable": {
-        "color": "#88ccff",
+        "color": "#00ffff",
         "marker": "o",  # circle
         "label": "AIS Disabling Zone",
-        "size": 50,
+        "size": 100,
     },
     "ocean_mapping": {
         "color": "#44aaff",
         "marker": "s",  # square
         "label": "Ocean Mapping Behavior",
-        "size": 55,
+        "size": 110,
     },
     "us_interest": {
         "color": "#ffd700",
         "marker": "*",  # star
         "label": "U.S. Interest Area",
-        "size": 100,
+        "size": 200,
     },
     "transshipment": {
         "color": "#aa66cc",
         "marker": "h",  # hexagon
         "label": "Transshipment",
-        "size": 55,
+        "size": 110,
     },
 }
 
@@ -83,8 +83,9 @@ INCIDENT_STYLES = {
 # =============================================================================
 
 # Opacity range for effort intensity scaling
-EFFORT_ALPHA_MIN = 0.3
-EFFORT_ALPHA_MAX = 0.95
+EFFORT_ALPHA_MIN = 0.05
+EFFORT_ALPHA_MAX = 0.70
+EFFORT_POINT_SIZE = 0.4
 
 # =============================================================================
 # Typography
