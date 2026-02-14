@@ -1,0 +1,22 @@
+# Map rendering
+cartopy>=0.22
+matplotlib>=3.8,<3.10
+Pillow>=10.0
+
+# Geospatial
+geopandas>=0.14
+shapely>=2.0
+pyproj>=3.6
+fiona>=1.9
+
+# Data processing
+pandas>=2.0
+numpy>=1.24
+pyarrow>=14.0
+
+# HTTP / API
+requests>=2.31
+
+# GFW API client (requires Python 3.11+)
+# Uncomment once API key is obtained:
+# gfw-api-python-client>=1.0

@@ -1,0 +1,36 @@
+# Data files (too large for git)
+data/raw/
+data/processed/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets
+.env
+config_local.py
+
+# Output (regenerable)
+output/static/*.png
+output/static/*.pdf
+output/static/*.svg
+output/interactive/data/
