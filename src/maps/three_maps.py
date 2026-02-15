@@ -1,10 +1,11 @@
 """
 Three publication-quality maps of China's DWF fleet:
-  1. Seasonal movement (global, monthly color cycle)
-  2. Western Hemisphere (Americas + Hawaii)
-  3. Western Pacific / Indo-Pacific
+  1. Seasonal movement (global, 1-degree grid colored by peak month)
+  2. Western Hemisphere (Americas + Hawaii) — heatmap + incident callouts
+  3. Western Pacific / Indo-Pacific — heatmap + incident callouts
 
-Each map includes EEZ boundaries, incident annotations, and regional labels.
+Design: effort rendered as smooth heatmap (background context), incidents
+and EEZ boundaries as the narrative focal points (prominent annotations).
 """
 
 import sys
@@ -17,6 +18,7 @@ import matplotlib.colors as mcolors
 import matplotlib.patches as mpatches
 import matplotlib.lines as mlines
 import matplotlib.patheffects as pe
+from matplotlib.colors import LinearSegmentedColormap
 import numpy as np
 import pandas as pd
 
@@ -24,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import config
 from src.maps.styles import (
     OCEAN_COLOR, LAND_COLOR, COUNTRY_BORDER_COLOR,
-    EEZ_LINE_COLOR, EEZ_LINE_ALPHA,
+    EEZ_LINE_COLOR,
     GRATICULE_COLOR, TEXT_PRIMARY, TEXT_SECONDARY,
     INCIDENT_STYLES,
     FONT_FAMILY, CAVEAT_FONTSIZE,
@@ -32,30 +34,37 @@ from src.maps.styles import (
 
 PLATE_CARREE = ccrs.PlateCarree()
 
-# Month color ramp: cool blue (winter) -> warm green (spring) -> hot (summer) -> cool (fall)
+# ── Month color ramp ──────────────────────────────────────────────────────
 MONTH_COLORS = {
-    1: "#4575b4",   # Jan - deep blue
-    2: "#74add1",   # Feb - light blue
-    3: "#abd9e9",   # Mar - pale cyan
-    4: "#66c2a5",   # Apr - teal
-    5: "#3cb44b",   # May - green
-    6: "#fee090",   # Jun - pale gold
-    7: "#fdae61",   # Jul - orange
-    8: "#f46d43",   # Aug - red-orange
-    9: "#d73027",   # Sep - red
-    10: "#a50026",  # Oct - crimson
-    11: "#8e4585",  # Nov - purple
-    12: "#5e4fa2",  # Dec - indigo
+    1: "#4575b4",  2: "#74add1",  3: "#abd9e9",  4: "#66c2a5",
+    5: "#3cb44b",  6: "#fee090",  7: "#fdae61",  8: "#f46d43",
+    9: "#d73027",  10: "#a50026", 11: "#8e4585", 12: "#5e4fa2",
 }
-
 MONTH_NAMES = {
     1: "Jan", 2: "Feb", 3: "Mar", 4: "Apr", 5: "May", 6: "Jun",
     7: "Jul", 8: "Aug", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dec",
 }
 
-# Text outline for labels over dark backgrounds
-TEXT_OUTLINE = [pe.withStroke(linewidth=2.5, foreground="#0a1628")]
+# ── Text styling ──────────────────────────────────────────────────────────
+TEXT_OUTLINE = [pe.withStroke(linewidth=3, foreground="#0a1628")]
 
+# ── Effort heatmap colormap: ocean-dark -> amber -> cream ─────────────────
+EFFORT_CMAP = LinearSegmentedColormap.from_list("dwf_effort", [
+    "#0a1628",  # invisible on ocean background
+    "#1c1200",  # very dark brown
+    "#3d2200",  # dark brown
+    "#6b3a00",  # medium brown
+    "#a05500",  # orange-brown
+    "#cc7700",  # orange
+    "#e8a530",  # amber
+    "#fff0c0",  # cream
+])
+EFFORT_CMAP.set_bad(color=(0, 0, 0, 0))  # fully transparent for cartopy wrapping
+
+
+# =========================================================================
+# Data helpers
+# =========================================================================
 
 def _load_natural_earth(name: str) -> gpd.GeoDataFrame:
     d = config.NATURAL_EARTH_DIR / name
@@ -72,8 +81,60 @@ def _load_eez() -> gpd.GeoDataFrame:
     return gpd.read_file(eez_file)
 
 
+def grid_effort(df, resolution=0.5, extent=None):
+    """
+    Aggregate effort into a regular grid for pcolormesh rendering.
+
+    Returns (lon_edges, lat_edges, grid_values).
+    lon_edges has shape (N+1,), lat_edges has shape (M+1,), grid has shape (M, N).
+    """
+    d = df.copy()
+    if extent:
+        d = d[(d["lon"] >= extent[0]) & (d["lon"] <= extent[1]) &
+              (d["lat"] >= extent[2]) & (d["lat"] <= extent[3])]
+
+    if len(d) == 0:
+        return None, None, None
+
+    # Snap to grid centers
+    d["grid_lat"] = (d["lat"] / resolution).round() * resolution
+    d["grid_lon"] = (d["lon"] / resolution).round() * resolution
+
+    gridded = d.groupby(["grid_lat", "grid_lon"])["fishing_hours"].sum().reset_index()
+
+    lat_min = gridded["grid_lat"].min()
+    lat_max = gridded["grid_lat"].max()
+    lon_min = gridded["grid_lon"].min()
+    lon_max = gridded["grid_lon"].max()
+
+    # Cell centers and edges
+    lat_centers = np.arange(lat_min, lat_max + resolution * 0.1, resolution)
+    lon_centers = np.arange(lon_min, lon_max + resolution * 0.1, resolution)
+    lat_edges = np.concatenate([lat_centers - resolution / 2,
+                                [lat_centers[-1] + resolution / 2]])
+    lon_edges = np.concatenate([lon_centers - resolution / 2,
+                                [lon_centers[-1] + resolution / 2]])
+
+    n_lat = len(lat_centers)
+    n_lon = len(lon_centers)
+    grid = np.full((n_lat, n_lon), np.nan)
+
+    lat_idx = np.round((gridded["grid_lat"].values - lat_min) / resolution).astype(int)
+    lon_idx = np.round((gridded["grid_lon"].values - lon_min) / resolution).astype(int)
+    valid = (lat_idx >= 0) & (lat_idx < n_lat) & (lon_idx >= 0) & (lon_idx < n_lon)
+    grid[lat_idx[valid], lon_idx[valid]] = gridded["fishing_hours"].values[valid]
+
+    print(f"    Grid: {n_lat}x{n_lon} cells, "
+          f"{np.count_nonzero(~np.isnan(grid)):,} non-empty")
+    return lon_edges, lat_edges, grid
+
+
+# =========================================================================
+# Rendering components
+# =========================================================================
+
 def render_basemap(ax, extent=None):
-    """Render dark basemap with land, borders, graticules."""
+    """Dark basemap with land, borders, graticules."""
     ax.set_facecolor(OCEAN_COLOR)
 
     land = _load_natural_earth("land")
@@ -99,89 +160,182 @@ def render_basemap(ax, extent=None):
 
 
 def render_eez(ax, eez_gdf=None, highlight_countries=None):
-    """Render EEZ boundaries. Optionally highlight specific countries."""
+    """EEZ boundaries — subtle background for all, prominent for key nations."""
     if eez_gdf is None:
         try:
             eez_gdf = _load_eez()
         except FileNotFoundError:
             return
 
-    # Draw all EEZ as subtle lines
+    # All EEZ as faint background
     ax.add_geometries(
         eez_gdf.geometry, crs=PLATE_CARREE,
         facecolor="none", edgecolor=EEZ_LINE_COLOR,
-        linewidth=0.5, alpha=EEZ_LINE_ALPHA + 0.1,
+        linewidth=0.3, alpha=0.12,
     )
 
-    # Highlight specific countries' EEZ
+    # Highlighted countries: bright, thick, dashed
     if highlight_countries:
         for iso in highlight_countries:
             country_eez = eez_gdf[eez_gdf["ISO_A3"] == iso]
             if len(country_eez) > 0:
                 ax.add_geometries(
                     country_eez.geometry, crs=PLATE_CARREE,
-                    facecolor="none", edgecolor="#55aadd",
-                    linewidth=1.2, alpha=0.5, linestyle="--",
+                    facecolor="none", edgecolor="#55ccee",
+                    linewidth=2.0, alpha=0.65, linestyle="--",
                 )
 
 
-def render_incidents_annotated(ax, incidents_df, projection=None):
-    """Render incidents with callout labels, staggering offsets for clusters."""
+def render_effort_heatmap(ax, effort_df, extent, resolution=0.5):
+    """Render effort as a clean pcolormesh heatmap."""
+    lon_edges, lat_edges, grid = grid_effort(
+        effort_df, resolution=resolution, extent=extent
+    )
+    if grid is None:
+        return
+
+    # Log-transform and normalize to [0, 1]
+    log_grid = np.log1p(np.where(np.isnan(grid), 0, grid))
+    nonzero = log_grid[log_grid > 0]
+    if len(nonzero) == 0:
+        return
+    p95 = np.percentile(nonzero, 95)
+    if p95 == 0:
+        p95 = 1
+    normalized = np.clip(log_grid / p95, 0, 1)
+
+    # Mask empty cells (will render as ocean background via set_bad)
+    masked = np.ma.masked_where(np.isnan(grid) | (grid <= 0), normalized)
+
+    ax.pcolormesh(
+        lon_edges, lat_edges, masked,
+        cmap=EFFORT_CMAP, vmin=0, vmax=1,
+        transform=PLATE_CARREE, zorder=2,
+        rasterized=True,
+    )
+
+
+def cluster_incidents(incidents_df, radius_deg=5.0):
+    """
+    Group nearby incidents into clusters for cleaner annotation.
+    Returns list of cluster dicts with center position and summary text.
+    """
+    if incidents_df is None or len(incidents_df) == 0:
+        return []
+
+    clusters = []
+    used = set()
+
+    for idx, row in incidents_df.iterrows():
+        if idx in used:
+            continue
+
+        group = [row]
+        used.add(idx)
+
+        for jdx, other in incidents_df.iterrows():
+            if jdx in used:
+                continue
+            if (abs(row["lat"] - other["lat"]) < radius_deg and
+                    abs(row["lon"] - other["lon"]) < radius_deg):
+                group.append(other)
+                used.add(jdx)
+
+        center_lat = np.mean([r["lat"] for r in group])
+        center_lon = np.mean([r["lon"] for r in group])
+
+        if len(group) == 1:
+            r = group[0]
+            title = r.get("title", "")
+            if len(title) > 48:
+                title = title[:45] + "..."
+            summary = title
+        else:
+            region = group[0].get("country_affected", "Region")
+            n = len(group)
+            lines = [f"{region}: {n} incidents"]
+            for r in group[:3]:
+                t = r.get("title", "")
+                if len(t) > 38:
+                    t = t[:35] + "..."
+                lines.append(f"\u2022 {t}")
+            if len(group) > 3:
+                lines.append(f"\u2022 ...and {len(group) - 3} more")
+            summary = "\n".join(lines)
+
+        clusters.append({
+            "lat": center_lat,
+            "lon": center_lon,
+            "incidents": group,
+            "summary": summary,
+            "n_incidents": len(group),
+        })
+
+    return clusters
+
+
+def render_incidents_clustered(ax, incidents_df, manual_offsets=None):
+    """
+    Plot incident markers + clustered boxed annotations.
+
+    manual_offsets: optional dict {cluster_index: (x_pts, y_pts)} to override
+                    auto-positioning for specific clusters.
+    """
     if incidents_df is None or len(incidents_df) == 0:
         return
 
-    # Track placed label positions to stagger overlapping annotations
-    placed = []
-
-    for idx, (_, row) in enumerate(incidents_df.iterrows()):
+    # Plot all individual markers
+    for _, row in incidents_df.iterrows():
         cat = row["category"]
         style = INCIDENT_STYLES.get(cat, INCIDENT_STYLES["eez_violation"])
-
         ax.scatter(
             row["lon"], row["lat"],
             c=style["color"], marker=style["marker"],
-            s=style["size"], edgecolors="white", linewidths=1.2,
+            s=style["size"] * 1.5, edgecolors="white", linewidths=1.5,
             transform=PLATE_CARREE, zorder=10,
         )
 
-        # Short label from title
-        label = row.get("title", "")
-        if len(label) > 40:
-            label = label[:37] + "..."
+    # Cluster and add boxed annotations
+    clusters = cluster_incidents(incidents_df, radius_deg=5.0)
 
-        # Stagger offset direction to avoid overlapping labels in clusters
-        angles = [(14, 12), (-14, 14), (14, -16), (-14, -14),
-                  (20, 0), (-20, 0), (0, 20), (0, -20)]
-        offset = angles[idx % len(angles)]
+    default_offsets = [
+        (55, 45), (-65, 50), (60, -50), (-60, -45),
+        (70, 15), (-70, 15), (45, 60), (-50, -60),
+    ]
 
-        # Check proximity to already-placed labels and adjust
-        for (px, py) in placed:
-            if abs(row["lon"] - px) < 3 and abs(row["lat"] - py) < 3:
-                offset = angles[(idx + 2) % len(angles)]
-                break
-        placed.append((row["lon"], row["lat"]))
+    for i, cluster in enumerate(clusters):
+        offset = default_offsets[i % len(default_offsets)]
+        if manual_offsets and i in manual_offsets:
+            offset = manual_offsets[i]
 
         ax.annotate(
-            label,
-            xy=(row["lon"], row["lat"]),
+            cluster["summary"],
+            xy=(cluster["lon"], cluster["lat"]),
             xytext=offset,
             textcoords="offset points",
-            fontsize=5.5,
+            fontsize=7.5,
             fontfamily=FONT_FAMILY,
             color=TEXT_PRIMARY,
-            path_effects=TEXT_OUTLINE,
+            linespacing=1.4,
+            bbox=dict(
+                boxstyle="round,pad=0.4",
+                facecolor="#0d1b2a",
+                edgecolor="#556677",
+                alpha=0.9,
+            ),
             xycoords=PLATE_CARREE._as_mpl_transform(ax),
-            zorder=11,
+            zorder=12,
             arrowprops=dict(
-                arrowstyle="-",
-                color="#666688",
-                linewidth=0.5,
+                arrowstyle="-|>",
+                color="#8899aa",
+                linewidth=1.0,
+                connectionstyle="arc3,rad=0.15",
             ),
         )
 
 
-def add_region_label(ax, lon, lat, text, fontsize=8, color=TEXT_SECONDARY):
-    """Add a region label with text outline for readability."""
+def add_region_label(ax, lon, lat, text, fontsize=9, color=TEXT_SECONDARY):
+    """Region label with outline for readability over dark background."""
     ax.text(
         lon, lat, text,
         transform=PLATE_CARREE,
@@ -193,15 +347,59 @@ def add_region_label(ax, lon, lat, text, fontsize=8, color=TEXT_SECONDARY):
     )
 
 
+def add_effort_colorbar(fig, label="Fishing Effort Intensity"):
+    """Add a horizontal effort colorbar at the bottom of the figure."""
+    cbar_ax = fig.add_axes([0.12, 0.065, 0.25, 0.012])
+    norm = plt.Normalize(0, 1)
+    sm = plt.cm.ScalarMappable(cmap=EFFORT_CMAP, norm=norm)
+    sm.set_array([])
+    cbar = fig.colorbar(sm, cax=cbar_ax, orientation="horizontal")
+    cbar.set_label(label, fontsize=8, color=TEXT_PRIMARY, fontfamily=FONT_FAMILY)
+    cbar.set_ticks([0, 0.5, 1])
+    cbar.set_ticklabels(["Low", "Medium", "High"])
+    cbar.ax.tick_params(labelsize=7, colors=TEXT_PRIMARY)
+    return cbar
+
+
+def add_incident_legend(ax, loc="upper left", bbox=None):
+    """Add a legend for incident marker types + EEZ boundaries."""
+    handles = []
+    for cat, style in INCIDENT_STYLES.items():
+        if cat == "transshipment":
+            continue
+        h = mlines.Line2D(
+            [], [], color=style["color"], marker=style["marker"],
+            linestyle="None", markersize=9, markeredgecolor="white",
+            markeredgewidth=1.0, label=style["label"],
+        )
+        handles.append(h)
+    handles.append(mlines.Line2D(
+        [], [], color="#55ccee", linestyle="--",
+        linewidth=1.5, label="National EEZ",
+    ))
+
+    kwargs = dict(
+        handles=handles, title="Incidents & Boundaries",
+        loc=loc, fontsize=8, title_fontsize=9,
+        facecolor="#0d1b2a", edgecolor="#333355",
+        labelcolor=TEXT_PRIMARY, framealpha=0.92,
+    )
+    if bbox:
+        kwargs["bbox_to_anchor"] = bbox
+    leg = ax.legend(**kwargs)
+    leg.get_title().set_color(TEXT_PRIMARY)
+    return leg
+
+
 # =========================================================================
 # MAP 1: Seasonal Movement (Global)
 # =========================================================================
 
 def render_seasonal_map():
-    """Global map showing fleet movement patterns by month."""
+    """Global map: 1-degree grid colored by peak fishing month."""
     print("=== Map 1: Seasonal Movement ===")
 
-    # Load raw data with monthly resolution
+    # Load raw CSVs (need monthly resolution)
     frames = []
     for year in config.YEARS:
         f = config.GFW_EFFORT_DIR / f"china_effort_{year}.csv"
@@ -209,7 +407,6 @@ def render_seasonal_map():
             df = pd.read_csv(f)
             df.columns = ["lat", "lon", "time_range", "flag", "geartype",
                           "vessel_count", "fishing_hours"]
-            # Exclude domestic
             df = df[~((df["lat"] >= 18) & (df["lat"] <= 42) &
                       (df["lon"] >= 105) & (df["lon"] <= 130))]
             df["month"] = df["time_range"].str[5:7].astype(int)
@@ -217,24 +414,27 @@ def render_seasonal_map():
 
     effort = pd.concat(frames, ignore_index=True)
 
-    # Aggregate by cell + month (across all years for cleaner patterns)
-    monthly = effort.groupby(["lat", "lon", "month"], as_index=False).agg(
-        fishing_hours=("fishing_hours", "sum"),
-    )
-    print(f"  {len(monthly):,} cells with monthly data")
+    # Aggregate to 1-degree grid
+    res = 1.0
+    effort["grid_lat"] = (effort["lat"] / res).round() * res
+    effort["grid_lon"] = (effort["lon"] / res).round() * res
 
-    # Determine dominant month per cell (where most fishing hours occur)
-    dominant = effort.groupby(["lat", "lon", "month"], as_index=False).agg(
-        fishing_hours=("fishing_hours", "sum"),
-    )
-    idx = dominant.groupby(["lat", "lon"])["fishing_hours"].idxmax()
-    dominant = dominant.loc[idx].copy()
-    total_per_cell = effort.groupby(["lat", "lon"])["fishing_hours"].sum().reset_index()
-    total_per_cell.columns = ["lat", "lon", "total_hours"]
-    dominant = dominant.merge(total_per_cell, on=["lat", "lon"])
-    print(f"  {len(dominant):,} unique cells with dominant month")
+    monthly_grid = effort.groupby(
+        ["grid_lat", "grid_lon", "month"], as_index=False
+    ).agg(fishing_hours=("fishing_hours", "sum"))
 
-    # Render
+    # Dominant month per cell
+    idx = monthly_grid.groupby(["grid_lat", "grid_lon"])["fishing_hours"].idxmax()
+    dominant = monthly_grid.loc[idx].copy()
+
+    # Total effort per cell (for brightness)
+    totals = effort.groupby(
+        ["grid_lat", "grid_lon"]
+    )["fishing_hours"].sum().reset_index(name="total_hours")
+    dominant = dominant.merge(totals, on=["grid_lat", "grid_lon"])
+    print(f"  {len(dominant):,} grid cells at {res}\u00b0 resolution")
+
+    # ── Render ──
     projection = ccrs.Robinson(central_longitude=180)
     fig = plt.figure(figsize=(24, 13), facecolor=OCEAN_COLOR)
     ax = fig.add_subplot(1, 1, 1, projection=projection)
@@ -242,14 +442,15 @@ def render_seasonal_map():
     render_basemap(ax)
     render_eez(ax)
 
-    # Plot each cell colored by dominant month, alpha by total effort
-    log_hours = np.log1p(dominant["total_hours"].values)
-    p95 = np.percentile(log_hours, 95)
+    # Alpha from effort intensity
+    log_h = np.log1p(dominant["total_hours"].values)
+    p95 = np.percentile(log_h, 95)
     if p95 == 0:
         p95 = 1
-    normalized = np.clip(log_hours / p95, 0, 1)
-    alphas = 0.08 + 0.65 * (normalized ** 1.5)
+    norm = np.clip(log_h / p95, 0, 1)
+    alphas = 0.15 + 0.75 * (norm ** 1.2)
 
+    # Plot grid cells as colored squares
     for month in range(1, 13):
         mask = dominant["month"] == month
         if not mask.any():
@@ -264,20 +465,21 @@ def render_seasonal_map():
             ma,
         ])
         ax.scatter(
-            mdata["lon"].values, mdata["lat"].values,
-            c=colors, s=0.5, transform=PLATE_CARREE,
-            rasterized=True, zorder=2,
+            mdata["grid_lon"].values, mdata["grid_lat"].values,
+            c=colors, s=14, marker="s",
+            transform=PLATE_CARREE, rasterized=True, zorder=2,
         )
 
     # Region labels
-    add_region_label(ax, -58, -48, "Argentine\nShelf", fontsize=9)
-    add_region_label(ax, -90, -2, "Galapagos", fontsize=9)
-    add_region_label(ax, -170, -12, "American\nSamoa", fontsize=8)
-    add_region_label(ax, -155, 22, "Hawaii", fontsize=8)
-    add_region_label(ax, 55, -20, "Indian\nOcean", fontsize=9)
-    add_region_label(ax, -5, 5, "West\nAfrica", fontsize=9)
-    add_region_label(ax, 155, 35, "N. Pacific\nSquid Grounds", fontsize=8)
-    add_region_label(ax, 130, -5, "SE Asia", fontsize=8)
+    add_region_label(ax, -58, -52, "Patagonian\nShelf", fontsize=10)
+    add_region_label(ax, -92, -5, "Gal\u00e1pagos", fontsize=10)
+    add_region_label(ax, -170, -14, "American\nSamoa", fontsize=9)
+    add_region_label(ax, -155, 24, "Hawai\u02bbi", fontsize=9)
+    add_region_label(ax, 55, -22, "Indian\nOcean", fontsize=10)
+    add_region_label(ax, -8, 7, "Gulf of\nGuinea", fontsize=9)
+    add_region_label(ax, 152, 38, "N. Pacific\nSquid Grounds", fontsize=9)
+    add_region_label(ax, 125, -8, "SE Asia /\nCoral Triangle", fontsize=9)
+    add_region_label(ax, 127, 37, "Korean\nWaters", fontsize=8)
 
     # Month legend
     month_patches = [
@@ -289,33 +491,35 @@ def render_seasonal_map():
         loc="lower left", ncol=3,
         fontsize=8, title_fontsize=9,
         facecolor="#0d1b2a", edgecolor="#333355",
-        labelcolor=TEXT_PRIMARY, framealpha=0.9,
+        labelcolor=TEXT_PRIMARY, framealpha=0.92,
     )
     leg.get_title().set_color(TEXT_PRIMARY)
 
-    # Title
+    # Titles
     fig.text(
-        0.5, 0.95,
+        0.5, 0.96,
         "China\u2019s Distant Water Fleet: Seasonal Fishing Patterns 2022\u20132025",
         ha="center", va="top", fontsize=24, fontweight="bold",
         fontfamily=FONT_FAMILY, color=TEXT_PRIMARY,
     )
     fig.text(
-        0.5, 0.925,
-        "Each cell colored by its peak fishing month  \u2022  Brightness indicates total effort intensity",
+        0.5, 0.935,
+        "Each cell colored by peak fishing month  \u2022  "
+        "Brightness shows effort intensity  \u2022  1\u00b0 grid",
         ha="center", va="top", fontsize=12,
         fontfamily=FONT_FAMILY, color=TEXT_SECONDARY,
     )
     fig.text(
         0.02, 0.01,
-        "Source: Global Fishing Watch 4Wings API (CC BY-SA 4.0)  \u2022  Robinson projection centered on 180\u00b0",
+        "Source: Global Fishing Watch 4Wings API (CC BY-SA 4.0)  \u2022  "
+        "Robinson projection centered on 180\u00b0",
         ha="left", va="bottom", fontsize=CAVEAT_FONTSIZE,
         fontfamily=FONT_FAMILY, color=TEXT_SECONDARY,
     )
     fig.text(
         0.98, 0.01,
-        "Note: Only AIS-broadcasting vessels shown (~50% of fleet). "
-        "Domestic waters (China EEZ) excluded.",
+        "Note: AIS-broadcasting vessels only (~50% of fleet). "
+        "China domestic waters excluded.",
         ha="right", va="bottom", fontsize=CAVEAT_FONTSIZE,
         fontfamily=FONT_FAMILY, color=TEXT_SECONDARY, style="italic",
     )
@@ -333,14 +537,10 @@ def render_seasonal_map():
 # =========================================================================
 
 def render_western_hemisphere_map():
-    """Americas-focused map: Argentina, Galapagos, American Samoa, Hawaii."""
+    """Americas + Hawaii: heatmap background, prominent incident callouts."""
     print("\n=== Map 2: Western Hemisphere ===")
 
     effort = pd.read_parquet(config.PROCESSED_DIR / "china_dwf_effort.parquet")
-    gaps = None
-    gap_path = config.PROCESSED_DIR / "ais_gaps_intentional.parquet"
-    if gap_path.exists():
-        gaps = pd.read_parquet(gap_path)
 
     from src.data.process_incidents import load_incidents
     try:
@@ -348,119 +548,62 @@ def render_western_hemisphere_map():
     except FileNotFoundError:
         incidents = None
 
-    # Filter to Western Hemisphere extent
-    # Use -180 to -30 longitude (Americas + eastern Pacific), lat to 35 to include Hawaii
     extent = [-180, -30, -60, 35]
-    effort_wh = effort[(effort["lon"] >= extent[0]) & (effort["lon"] <= extent[1]) &
-                       (effort["lat"] >= extent[2]) & (effort["lat"] <= extent[3])]
-    print(f"  Effort cells in view: {len(effort_wh):,}")
 
+    inc_wh = None
     if incidents is not None:
-        inc_wh = incidents[(incidents["lon"] >= extent[0]) & (incidents["lon"] <= extent[1]) &
-                          (incidents["lat"] >= extent[2]) & (incidents["lat"] <= extent[3])]
-    else:
-        inc_wh = None
+        inc_wh = incidents[
+            (incidents["lon"] >= extent[0]) & (incidents["lon"] <= extent[1]) &
+            (incidents["lat"] >= extent[2]) & (incidents["lat"] <= extent[3])
+        ]
 
-    if gaps is not None:
-        gaps_wh = gaps[(gaps["off_lon"] >= extent[0]) & (gaps["off_lon"] <= extent[1]) &
-                       (gaps["off_lat"] >= extent[2]) & (gaps["off_lat"] <= extent[3])]
-    else:
-        gaps_wh = None
-
-    # Render
+    # ── Render ──
     fig = plt.figure(figsize=(20, 16), facecolor=OCEAN_COLOR)
     ax = fig.add_subplot(1, 1, 1, projection=PLATE_CARREE)
 
     render_basemap(ax, extent=extent)
     render_eez(ax, highlight_countries=["ARG", "ECU", "USA", "PER", "CHL", "BRA"])
 
-    # Effort by year
-    from src.maps.styles import YEAR_COLORS, EFFORT_ALPHA_MIN, EFFORT_ALPHA_MAX
-    for year in sorted(effort_wh["year"].unique()):
-        if year not in YEAR_COLORS:
-            continue
-        yd = effort_wh[effort_wh["year"] == year]
-        hours = yd["fishing_hours"].values
-        log_h = np.log1p(hours)
-        p95 = np.percentile(log_h, 95) if len(log_h) > 0 else 1
-        if p95 == 0:
-            p95 = 1
-        norm = np.clip(log_h / p95, 0, 1)
-        alphas = EFFORT_ALPHA_MIN + (EFFORT_ALPHA_MAX - EFFORT_ALPHA_MIN) * (norm ** 2)
-        rgb = mcolors.to_rgb(YEAR_COLORS[year])
-        colors = np.column_stack([
-            np.full(len(yd), rgb[0]), np.full(len(yd), rgb[1]),
-            np.full(len(yd), rgb[2]), alphas,
-        ])
-        ax.scatter(
-            yd["lon"].values, yd["lat"].values,
-            c=colors, s=0.8, transform=PLATE_CARREE,
-            rasterized=True, zorder=2,
-        )
+    # Effort heatmap
+    print("  Rendering effort heatmap...")
+    render_effort_heatmap(ax, effort, extent=extent, resolution=0.5)
 
-    # AIS gaps
-    if gaps_wh is not None and len(gaps_wh) > 0:
-        ax.scatter(
-            gaps_wh["off_lon"].values, gaps_wh["off_lat"].values,
-            c="#88ccff", s=4, alpha=0.2,
-            transform=PLATE_CARREE, rasterized=True, zorder=3,
-        )
-
-    # Incidents with annotations
-    if inc_wh is not None:
-        render_incidents_annotated(ax, inc_wh)
+    # Incident annotations
+    if inc_wh is not None and len(inc_wh) > 0:
+        print(f"  Annotating {len(inc_wh)} incidents...")
+        render_incidents_clustered(ax, inc_wh)
 
     # Region labels
-    add_region_label(ax, -59, -52, "Patagonian Shelf\nSquid Grounds", fontsize=10, color="#ccddee")
-    add_region_label(ax, -92, 2, "Gal\u00e1pagos\nMarine Reserve", fontsize=10, color="#ccddee")
-    add_region_label(ax, -170, -10, "American\nSamoa", fontsize=9, color="#ccddee")
-    add_region_label(ax, -157, 22, "Hawai\u02bbi", fontsize=9, color="#ccddee")
-    add_region_label(ax, -85, -18, "Peru\nEEZ", fontsize=8)
-    add_region_label(ax, -80, -35, "Chile\nEEZ", fontsize=8)
+    add_region_label(ax, -65, -55, "Patagonian Shelf\nSquid Grounds",
+                     fontsize=11, color="#ccddee")
+    add_region_label(ax, -98, 6, "Gal\u00e1pagos\nMarine Reserve",
+                     fontsize=11, color="#ccddee")
+    add_region_label(ax, -170, -5, "American\nSamoa", fontsize=9, color="#ccddee")
+    add_region_label(ax, -157, 28, "Hawai\u02bbi", fontsize=10, color="#ccddee")
+    add_region_label(ax, -85, -24, "Peru EEZ", fontsize=8)
+    add_region_label(ax, -80, -40, "Chile EEZ", fontsize=8)
 
-    # Year legend
-    from src.maps.styles import YEAR_LABELS
-    year_patches = [mpatches.Patch(color=c, label=YEAR_LABELS[y])
-                    for y, c in YEAR_COLORS.items()]
-    # Incident legend
-    inc_handles = []
-    for cat, style in INCIDENT_STYLES.items():
-        h = mlines.Line2D([], [], color=style["color"], marker=style["marker"],
-                          linestyle="None", markersize=8, markeredgecolor="white",
-                          markeredgewidth=0.8, label=style["label"])
-        inc_handles.append(h)
+    # Legend
+    add_effort_colorbar(fig)
+    add_incident_legend(ax, loc="upper left")
 
-    # AIS gap handle
-    gap_handle = mlines.Line2D([], [], color="#88ccff", marker="o",
-                               linestyle="None", markersize=5, alpha=0.5,
-                               label="AIS Disabling Event")
-
-    all_handles = year_patches + [gap_handle] + inc_handles
-    leg = ax.legend(
-        handles=all_handles, title="Layers",
-        loc="upper left", fontsize=7.5, title_fontsize=8.5,
-        facecolor="#0d1b2a", edgecolor="#333355",
-        labelcolor=TEXT_PRIMARY, framealpha=0.9,
-    )
-    leg.get_title().set_color(TEXT_PRIMARY)
-
-    # Title
+    # Titles
     fig.text(
-        0.5, 0.96,
+        0.5, 0.97,
         "Chinese DWF Fleet in the Western Hemisphere 2022\u20132025",
         ha="center", va="top", fontsize=22, fontweight="bold",
         fontfamily=FONT_FAMILY, color=TEXT_PRIMARY,
     )
     fig.text(
-        0.5, 0.94,
-        "Fishing effort by year  \u2022  AIS disabling events  \u2022  "
-        "Documented enforcement incidents  \u2022  EEZ boundaries (dashed)",
+        0.5, 0.95,
+        "Fishing effort intensity  \u2022  Documented enforcement "
+        "incidents  \u2022  EEZ boundaries (dashed)",
         ha="center", va="top", fontsize=10,
         fontfamily=FONT_FAMILY, color=TEXT_SECONDARY,
     )
     fig.text(
         0.02, 0.01,
-        "Sources: Global Fishing Watch (CC BY-SA 4.0), Marine Regions EEZ, "
+        "Sources: Global Fishing Watch (CC BY-SA 4.0), EEZ boundaries, "
         "curated incident reports",
         ha="left", va="bottom", fontsize=CAVEAT_FONTSIZE,
         fontfamily=FONT_FAMILY, color=TEXT_SECONDARY,
@@ -474,18 +617,14 @@ def render_western_hemisphere_map():
 
 
 # =========================================================================
-# MAP 3: Western Pacific / Indo-Pacific
+# MAP 3: Indo-Pacific & West Africa
 # =========================================================================
 
 def render_indo_pacific_map():
-    """Western Pacific and Indian Ocean: SE Asia, Korea, W Africa, Indian Ocean."""
+    """Western Pacific, Indian Ocean, West Africa: heatmap + incidents."""
     print("\n=== Map 3: Indo-Pacific & West Africa ===")
 
     effort = pd.read_parquet(config.PROCESSED_DIR / "china_dwf_effort.parquet")
-    gaps = None
-    gap_path = config.PROCESSED_DIR / "ais_gaps_intentional.parquet"
-    if gap_path.exists():
-        gaps = pd.read_parquet(gap_path)
 
     from src.data.process_incidents import load_incidents
     try:
@@ -493,115 +632,70 @@ def render_indo_pacific_map():
     except FileNotFoundError:
         incidents = None
 
-    # Extent: West Africa through Western Pacific
-    extent = [-25, 180, -50, 50]
-    effort_ip = effort[(effort["lon"] >= extent[0]) & (effort["lon"] <= extent[1]) &
-                       (effort["lat"] >= extent[2]) & (effort["lat"] <= extent[3])]
-    print(f"  Effort cells in view: {len(effort_ip):,}")
+    # Tighter extent: West Africa coast through western Pacific
+    extent = [-20, 175, -42, 48]
 
+    inc_ip = None
     if incidents is not None:
-        inc_ip = incidents[(incidents["lon"] >= extent[0]) & (incidents["lon"] <= extent[1]) &
-                          (incidents["lat"] >= extent[2]) & (incidents["lat"] <= extent[3])]
-    else:
-        inc_ip = None
+        inc_ip = incidents[
+            (incidents["lon"] >= extent[0]) & (incidents["lon"] <= extent[1]) &
+            (incidents["lat"] >= extent[2]) & (incidents["lat"] <= extent[3])
+        ]
 
-    if gaps is not None:
-        gaps_ip = gaps[(gaps["off_lon"] >= extent[0]) & (gaps["off_lon"] <= extent[1]) &
-                       (gaps["off_lat"] >= extent[2]) & (gaps["off_lat"] <= extent[3])]
-    else:
-        gaps_ip = None
-
-    fig = plt.figure(figsize=(24, 14), facecolor=OCEAN_COLOR)
+    # ── Render ──
+    fig = plt.figure(figsize=(22, 13), facecolor=OCEAN_COLOR)
     ax = fig.add_subplot(1, 1, 1, projection=PLATE_CARREE)
 
     render_basemap(ax, extent=extent)
-    render_eez(ax, highlight_countries=["KOR", "JPN", "PHL", "VNM", "IDN",
-                                         "GHA", "CIV", "GIN", "VUT", "FJI"])
+    render_eez(ax, highlight_countries=[
+        "KOR", "JPN", "PHL", "VNM", "IDN",
+        "GHA", "CIV", "GIN", "VUT", "FJI",
+    ])
 
-    # Effort by year
-    from src.maps.styles import YEAR_COLORS, EFFORT_ALPHA_MIN, EFFORT_ALPHA_MAX, YEAR_LABELS
-    for year in sorted(effort_ip["year"].unique()):
-        if year not in YEAR_COLORS:
-            continue
-        yd = effort_ip[effort_ip["year"] == year]
-        hours = yd["fishing_hours"].values
-        log_h = np.log1p(hours)
-        p95 = np.percentile(log_h, 95) if len(log_h) > 0 else 1
-        if p95 == 0:
-            p95 = 1
-        norm = np.clip(log_h / p95, 0, 1)
-        alphas = EFFORT_ALPHA_MIN + (EFFORT_ALPHA_MAX - EFFORT_ALPHA_MIN) * (norm ** 2)
-        rgb = mcolors.to_rgb(YEAR_COLORS[year])
-        colors = np.column_stack([
-            np.full(len(yd), rgb[0]), np.full(len(yd), rgb[1]),
-            np.full(len(yd), rgb[2]), alphas,
-        ])
-        ax.scatter(
-            yd["lon"].values, yd["lat"].values,
-            c=colors, s=0.6, transform=PLATE_CARREE,
-            rasterized=True, zorder=2,
-        )
+    # Effort heatmap
+    print("  Rendering effort heatmap...")
+    render_effort_heatmap(ax, effort, extent=extent, resolution=0.5)
 
-    # AIS gaps
-    if gaps_ip is not None and len(gaps_ip) > 0:
-        ax.scatter(
-            gaps_ip["off_lon"].values, gaps_ip["off_lat"].values,
-            c="#88ccff", s=3, alpha=0.18,
-            transform=PLATE_CARREE, rasterized=True, zorder=3,
-        )
-
-    # Incidents with annotations
-    if inc_ip is not None:
-        render_incidents_annotated(ax, inc_ip)
+    # Incident annotations
+    if inc_ip is not None and len(inc_ip) > 0:
+        print(f"  Annotating {len(inc_ip)} incidents...")
+        render_incidents_clustered(ax, inc_ip)
 
     # Region labels
-    add_region_label(ax, 125, 35, "Yellow Sea /\nKorean EEZ", fontsize=9, color="#ccddee")
-    add_region_label(ax, 115, 12, "South\nChina Sea", fontsize=9, color="#ccddee")
-    add_region_label(ax, -5, 8, "Gulf of\nGuinea", fontsize=9, color="#ccddee")
-    add_region_label(ax, 60, -15, "Indian\nOcean", fontsize=10, color="#ccddee")
-    add_region_label(ax, 145, -5, "Papua New\nGuinea", fontsize=8)
-    add_region_label(ax, 168, -17, "Vanuatu", fontsize=8, color="#ccddee")
-    add_region_label(ax, 155, 40, "N. Pacific\nSquid Grounds", fontsize=9)
+    add_region_label(ax, 126, 38, "Yellow Sea /\nKorean EEZ",
+                     fontsize=10, color="#ccddee")
+    add_region_label(ax, 115, 10, "South\nChina Sea",
+                     fontsize=10, color="#ccddee")
+    add_region_label(ax, -6, 12, "Gulf of\nGuinea",
+                     fontsize=10, color="#ccddee")
+    add_region_label(ax, 60, -20, "Indian\nOcean",
+                     fontsize=11, color="#ccddee")
+    add_region_label(ax, 145, -8, "Papua New\nGuinea", fontsize=8)
+    add_region_label(ax, 168, -20, "Vanuatu",
+                     fontsize=9, color="#ccddee")
+    add_region_label(ax, 152, 43, "N. Pacific\nSquid Grounds", fontsize=9)
 
     # Legend
-    year_patches = [mpatches.Patch(color=c, label=YEAR_LABELS[y])
-                    for y, c in YEAR_COLORS.items()]
-    inc_handles = []
-    for cat, style in INCIDENT_STYLES.items():
-        h = mlines.Line2D([], [], color=style["color"], marker=style["marker"],
-                          linestyle="None", markersize=8, markeredgecolor="white",
-                          markeredgewidth=0.8, label=style["label"])
-        inc_handles.append(h)
-    gap_handle = mlines.Line2D([], [], color="#88ccff", marker="o",
-                               linestyle="None", markersize=5, alpha=0.5,
-                               label="AIS Disabling Event")
+    add_effort_colorbar(fig)
+    add_incident_legend(ax, loc="lower left", bbox=(0.28, 0.0))
 
-    all_handles = year_patches + [gap_handle] + inc_handles
-    leg = ax.legend(
-        handles=all_handles, title="Layers",
-        loc="lower left", fontsize=7.5, title_fontsize=8.5,
-        facecolor="#0d1b2a", edgecolor="#333355",
-        labelcolor=TEXT_PRIMARY, framealpha=0.9,
-    )
-    leg.get_title().set_color(TEXT_PRIMARY)
-
-    # Title
+    # Titles
     fig.text(
-        0.5, 0.96,
+        0.5, 0.97,
         "Chinese DWF Fleet: Indo-Pacific & West Africa 2022\u20132025",
         ha="center", va="top", fontsize=22, fontweight="bold",
         fontfamily=FONT_FAMILY, color=TEXT_PRIMARY,
     )
     fig.text(
-        0.5, 0.94,
-        "Fishing effort by year  \u2022  AIS disabling events  \u2022  "
-        "Documented enforcement incidents  \u2022  EEZ boundaries (dashed)",
+        0.5, 0.95,
+        "Fishing effort intensity  \u2022  Documented enforcement "
+        "incidents  \u2022  EEZ boundaries (dashed)",
         ha="center", va="top", fontsize=10,
         fontfamily=FONT_FAMILY, color=TEXT_SECONDARY,
     )
     fig.text(
         0.02, 0.01,
-        "Sources: Global Fishing Watch (CC BY-SA 4.0), Marine Regions EEZ, "
+        "Sources: Global Fishing Watch (CC BY-SA 4.0), EEZ boundaries, "
         "curated incident reports",
         ha="left", va="bottom", fontsize=CAVEAT_FONTSIZE,
         fontfamily=FONT_FAMILY, color=TEXT_SECONDARY,
@@ -613,6 +707,8 @@ def render_indo_pacific_map():
     plt.close(fig)
     print(f"  Saved: {out}")
 
+
+# =========================================================================
 
 if __name__ == "__main__":
     render_seasonal_map()
