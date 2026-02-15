@@ -180,7 +180,8 @@ def render_eez_light(ax, highlight_countries=None):
                 )
 
 
-def render_effort_density(ax, df):
+def render_effort_density(ax, df, alpha_min=0.04, alpha_max=0.20,
+                          point_size=0.6):
     """
     Render effort as a density cloud of semi-transparent warm dots.
     Natural row density (monthly × geartype) creates the heatmap effect.
@@ -195,7 +196,7 @@ def render_effort_density(ax, df):
     if p95 == 0:
         p95 = 1
     norm = np.clip(log_h / p95, 0, 1)
-    alphas = 0.04 + 0.16 * norm
+    alphas = alpha_min + (alpha_max - alpha_min) * norm
 
     rgb = mcolors.to_rgb(EFFORT_WARM)
     colors = np.column_stack([
@@ -207,8 +208,56 @@ def render_effort_density(ax, df):
 
     ax.scatter(
         df["lon"].values, df["lat"].values,
-        c=colors, s=0.6, edgecolors="none",
+        c=colors, s=point_size, edgecolors="none",
         transform=PLATE_CARREE, rasterized=True, zorder=2,
+    )
+
+
+# ── Flow arrows ─────────────────────────────────────────────────────────
+
+def _bezier_quad(p0, p1, p2, n=120):
+    """Quadratic Bézier curve. p0=start, p1=control, p2=end."""
+    t = np.linspace(0, 1, n)
+    x = (1 - t) ** 2 * p0[0] + 2 * (1 - t) * t * p1[0] + t ** 2 * p2[0]
+    y = (1 - t) ** 2 * p0[1] + 2 * (1 - t) * t * p1[1] + t ** 2 * p2[1]
+    return x, y
+
+
+def draw_flow_arrow(ax, start, end, bend=5, color=EFFORT_WARM,
+                    alpha=0.55, linewidth=3.0, head_size=120):
+    """
+    Draw a curved flow arrow on the map from start to end.
+
+    bend: perpendicular offset of the control point from the midpoint.
+          Positive = curve left (relative to travel direction),
+          negative = curve right.
+    """
+    mid = ((start[0] + end[0]) / 2, (start[1] + end[1]) / 2)
+
+    # Perpendicular direction
+    dx = end[0] - start[0]
+    dy = end[1] - start[1]
+    length = np.hypot(dx, dy)
+    if length == 0:
+        return
+    nx, ny = -dy / length, dx / length
+    ctrl = (mid[0] + nx * bend, mid[1] + ny * bend)
+
+    lons, lats = _bezier_quad(start, ctrl, end, n=120)
+
+    # Draw path
+    ax.plot(lons, lats, color=color, alpha=alpha, linewidth=linewidth,
+            transform=PLATE_CARREE, zorder=5, solid_capstyle="round")
+
+    # Arrowhead — triangle pointing in direction of travel
+    ddx = lons[-1] - lons[-6]
+    ddy = lats[-1] - lats[-6]
+    angle = np.degrees(np.arctan2(ddy, ddx))
+    ax.scatter(
+        lons[-1], lats[-1],
+        marker=(3, 0, angle - 90),
+        s=head_size, color=color, alpha=min(alpha + 0.15, 1.0),
+        transform=PLATE_CARREE, zorder=6, edgecolors="none",
     )
 
 
@@ -405,12 +454,12 @@ def render_seasonal_map():
 # =========================================================================
 
 def render_western_hemisphere_map():
-    """Americas + Hawaii: NYT-inspired light map with narrative annotations."""
+    """Americas: flow arrows showing fleet corridors, Pacific island labels."""
     print("\n=== Map 2: Western Hemisphere ===")
 
     extent = [-180, -30, -60, 18]
 
-    # Load raw effort for density rendering
+    # Load raw effort for subtle background density
     print("  Loading raw effort data...")
     effort = _load_raw_effort(extent=extent)
     print(f"  {len(effort):,} raw effort rows in extent")
@@ -427,26 +476,65 @@ def render_western_hemisphere_map():
         inc = None
 
     # ── Render ──
-    fig = plt.figure(figsize=(20, 18), facecolor=OCEAN_LIGHT)
+    fig = plt.figure(figsize=(20, 16), facecolor=OCEAN_LIGHT)
     ax = fig.add_subplot(1, 1, 1, projection=PLATE_CARREE)
 
+    # Basemap: highlight South American nations AND Pacific island nations
     render_light_basemap(ax, extent,
                          highlight_iso=["ARG", "ECU", "PER", "CHL"])
-    render_eez_light(ax, highlight_countries=["ARG", "ECU", "USA", "PER", "CHL"])
+    render_eez_light(ax, highlight_countries=[
+        "ARG", "ECU", "PER", "CHL",
+        "ASM", "WSM", "KIR", "COK", "TON", "PYF", "TKL", "NIU",
+    ])
 
-    # Effort density cloud
-    print("  Rendering effort density cloud...")
-    render_effort_density(ax, effort)
+    # Subtle effort density (background context, not the focus)
+    print("  Rendering subtle effort density...")
+    render_effort_density(ax, effort,
+                          alpha_min=0.015, alpha_max=0.07, point_size=0.3)
 
     # Subtle incident markers
     if inc is not None:
         render_incidents_subtle(ax, inc)
 
-    # ── Country labels ──
+    # ── Flow arrows (primary visual) ──
+    print("  Drawing flow arrows...")
+
+    # Route A: Main Pacific entry → equatorial squid belt
+    draw_flow_arrow(
+        ax, start=(-178, -2), end=(-105, -12),
+        bend=6, color=EFFORT_WARM, alpha=0.55, linewidth=4.0, head_size=160,
+    )
+
+    # Route B: Equatorial Pacific → Galápagos approach
+    draw_flow_arrow(
+        ax, start=(-105, -8), end=(-92, -1),
+        bend=-3, color=EFFORT_WARM, alpha=0.5, linewidth=3.0, head_size=120,
+    )
+
+    # Route C: Eastern Pacific → Patagonian Shelf (squid season)
+    draw_flow_arrow(
+        ax, start=(-105, -15), end=(-60, -45),
+        bend=8, color=EFFORT_WARM, alpha=0.5, linewidth=3.5, head_size=140,
+    )
+
+    # Route D: Entry → South Pacific Islands (longline tuna)
+    draw_flow_arrow(
+        ax, start=(-178, -8), end=(-155, -20),
+        bend=4, color=EFFORT_WARM, alpha=0.45, linewidth=2.5, head_size=100,
+    )
+
+    # ── Country labels (South America) ──
     add_country_label(ax, -65, -28, "Argentina", fontsize=12)
     add_country_label(ax, -77, -10, "Peru", fontsize=10)
     add_country_label(ax, -72, -34, "Chile", fontsize=9)
-    add_country_label(ax, -78, 0, "Ecuador", fontsize=9)
+    add_country_label(ax, -78, 1, "Ecuador", fontsize=9)
+
+    # ── Pacific island labels ──
+    add_country_label(ax, -170, -14, "Samoa", fontsize=7)
+    add_country_label(ax, -160, -21, "Cook Is.", fontsize=7)
+    add_country_label(ax, -175, -21, "Tonga", fontsize=7)
+    add_country_label(ax, -157, -3, "Kiribati", fontsize=7)
+    add_country_label(ax, -149, -17, "Fr. Polynesia", fontsize=6)
 
     # ── EEZ labels ──
     add_eez_label(ax, -88, -7, "Gal\u00e1pagos\nexclusive\neconomic zone")
@@ -454,20 +542,20 @@ def render_western_hemisphere_map():
 
     # ── Narrative annotations ──
     add_narrative(
-        ax, -115, 12,
-        "Red and orange show Chinese\n"
-        "fishing activity, 2022\u20132025.\n"
-        "Each dot is one vessel-month\n"
-        "of reported AIS position data.",
+        ax, -178, 13,
+        "Arrows show major fleet corridors.\n"
+        "Nearly 3,000 Chinese vessels\n"
+        "operate worldwide \u2014 the largest\n"
+        "distant water fleet in history.\n"
+        "Shading shows fishing intensity.",
         fontsize=9, ha="left", va="top",
     )
 
     add_narrative(
         ax, -82, -13,
-        "The Gal\u00e1pagos are part of Ecuador.\n"
-        "Yet each year, hundreds of Chinese\n"
-        "vessels fish at the edge of the\n"
-        "exclusive economic zone. In 2023,\n"
+        "Each year, hundreds of Chinese\n"
+        "vessels fish right at the edge of\n"
+        "the Gal\u00e1pagos EEZ. In 2023,\n"
         "510 vessels were documented here,\n"
         "along with 53 AIS shutoff events.",
         fontsize=9.5,
@@ -485,12 +573,13 @@ def render_western_hemisphere_map():
     )
 
     add_narrative(
-        ax, -175, -20,
-        "Chinese longliners take half\n"
-        "the South Pacific albacore\n"
-        "catch near American Samoa,\n"
-        "threatening local fisheries.",
-        fontsize=8.5,
+        ax, -178, -28,
+        "Chinese longliners take half the\n"
+        "South Pacific albacore catch.\n"
+        "Small island nations like Samoa,\n"
+        "Tonga, and Kiribati lack the coast\n"
+        "guards to patrol their vast EEZs.",
+        fontsize=9,
     )
 
     # ── Title ──
@@ -500,7 +589,7 @@ def render_western_hemisphere_map():
              ha="left", va="top", fontsize=26, fontweight="bold",
              fontfamily=FONT_FAMILY, color=TEXT_DARK)
     fig.text(0.08, 0.915,
-             "Fishing effort 2022\u20132025  |  "
+             "Fleet corridors 2022\u20132025  |  "
              "Exclusive economic zones  |  "
              "Documented enforcement incidents",
              ha="left", va="top", fontsize=10,
